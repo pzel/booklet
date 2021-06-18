@@ -1,0 +1,226 @@
+#!/usr/bin/env ruby
+require 'base64'
+require 'fileutils'
+$test_run = ENV["TEST_BOOKLET"]
+$deps = %w[ pdfseparate pdfunite pdfinfo pdftotext mktemp ]
+
+def ensure_dependencies! executables
+  executables.each do |executable|
+    unless system("which #{executable} >/dev/null 2>&1")
+      $stderr.write("The command-line program <#{executable}> is needed "+
+                    "for this script to work.\n"+
+                    "Please ensure that it's installed on your system.\n")
+      exit(1)
+    end
+  end
+end
+
+def fresh_temp_dir
+  `mktemp -d`.strip()
+end
+
+def page_count filename
+  `pdfinfo '#{filename}'`
+    .lines()
+    .filter{|l| l.start_with? "Pages:"}
+    .map{|l| l.split[1].to_i}
+    .first()
+end
+
+def explode filename
+  `pdfseparate '#{filename}' 'b-%d'`
+end
+
+def unite output_filename, page_order
+  pages = page_order
+    .map{|page| (page == :p) ? "pad" : "b-#{page}"}
+    .join(" ")
+  `pdfunite #{pages} '#{output_filename}'`
+end
+
+def assert_mod4(n)
+  if (n % 4) != 0
+    raise "Number not divisible by four: #{n}"
+  end
+end
+
+def booklet_pages(first, last, folio_count)
+  assert_mod4(folio_count)
+  pad_size = (4 - (last % 4)) % 4
+  bp(first, last+pad_size, folio_count).
+    map{|p| (p > last) ? :p : p}
+end
+
+def bp(n, m, pc)
+  folio_overflow = ((m - n) > pc)
+  finished = (m < n)
+  if folio_overflow
+    bp(n, n + (pc - 1), pc) + bp(n + pc, m, pc)
+  elsif finished
+    []
+  else
+    [m, n, n+1, m-1] + bp(n+2, m-2, pc)
+  end
+end
+
+def convert_file filename, folio_size
+  empty_pdf_page = Base64.decode64(DATA.read)
+  absolute_source_name = File.expand_path(filename)
+  base_source_name = File.basename(absolute_source_name)
+  output_name = "booklet-#{File.basename(filename)}"
+  Dir.chdir(fresh_temp_dir()) do
+    $stderr.print("Working in #{Dir.pwd}\n")
+    `cp -v '#{absolute_source_name}' '#{base_source_name}'`
+    explode(base_source_name)
+    File.open("pad", "w") { |f| f.write(empty_pdf_page) }
+    page_numbers = booklet_pages(1, page_count(base_source_name), 32)
+    unite(output_name, page_numbers)
+    File.expand_path(output_name)
+  end
+end
+
+def main
+  ensure_dependencies! $deps
+  if $test_run
+    # just let minitest run
+    true
+  elsif ARGV[0]
+    pwd = `pwd`
+    outfile = convert_file(ARGV[0], (ARGV[1] || 16))
+    `cp #{outfile} #{pwd}`
+  else
+    $stderr.write("Usage: booklet FILENAME [folio-size]\n\n"+
+                  "Output is a new file, booklet-FILENAME.pdf\n"+
+                  "The default folio-size is 16 pages (4 sheets)")
+    exit(1)
+  end
+end
+
+main
+
+## TESTS
+## Need to be in a block to ensure the Minitest class
+## is available at test definition time.
+if $test_run
+  require 'minitest/autorun'
+  def as_text filename
+    # The sample document contains only page numbers,
+    # so we can operate only on them.
+    `pdftotext '#{filename}' -`
+      .lines()
+      .map{|l| l.strip()}
+      .filter{|l| l != ""}
+      .map{|l| l.to_i}
+  end
+
+  class TestPageSorting < MiniTest::Test
+    def test_4_folio_4
+      assert_equal([4,1,2,3], booklet_pages(1,4,32))
+    end
+
+    def test_4_folio_32
+      assert_equal([4,1,2,3], booklet_pages(1,4,32))
+    end
+
+    def test_4_folio_16
+      # folio size doesn't matter when it exceeds no. pages
+      assert_equal([4,1,2,3], booklet_pages(1,4,32))
+    end
+
+    def test_9_folio_4
+      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, :p, 9, :p, :p],
+                   booklet_pages(1,9,4))
+    end
+
+    def test_8_folio_32
+      assert_equal([8,1,2,7,6,3,4,5], booklet_pages(1,8,32))
+    end
+
+    def test_8_folio_4
+      assert_equal([4,1,2,3,8,5,6,7], booklet_pages(1,8,4))
+    end
+
+    def test_20_folio_32
+      assert_equal([20, 1, 2, 19,
+                    18, 3, 4, 17,
+                    16, 5, 6, 15,
+                    14, 7, 8, 13,
+                    12, 9, 10, 11], booklet_pages(1,20,32))
+    end
+
+    def test_20_folio_16
+      # one folio, then another one starts for the last 4 pages
+      assert_equal(
+                   [16, 1, 2, 15, 14, 3, 4, 13, 12, 5, 6, 11, 10, 7, 8, 9,
+                    20, 17, 18, 19],
+                   booklet_pages(1,20,16))
+    end
+    def test_pad_three
+      assert_equal([:p, 1, 2, :p, :p, 3, 4, 5],
+                   booklet_pages(1,5,32))
+    end
+    def test_pad_two
+      # big booklet. last 'page' is empty on both sides
+      assert_equal([:p, 1, 2, :p, 6, 3, 4, 5],
+                   booklet_pages(1,6,32))
+    end
+    def test_pad_one
+      # still a big booklet. outsidemost page is empty
+      assert_equal([:p, 1, 2, 7, 6, 3, 4, 5],
+                   booklet_pages(1,7,32))
+    end
+    def test_pad_three_in_second_folio
+      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, 12, 9, 10, 11, 16, 13, 14, 15, :p, 17, 18, :p],
+                   booklet_pages(1,18,4))
+    end
+  end
+
+  class TestConversion < MiniTest::Test
+    def test_no_conversion
+      assert_equal((1..20).to_a, as_text("./test-document.pdf"))
+    end
+
+    def test_20_20_conversion
+      new_file = convert_file("./test-document.pdf",32)
+      assert_equal([20, 1,  2, 19,
+                    18, 3,  4, 17,
+                    16, 5,  6, 15,
+                    14, 7,  8, 13,
+                    12, 9, 10, 11],
+                   as_text(new_file))
+    end
+
+    def test_17_16_conversion
+      # we assert that an extra 3 pages of padding are produced
+      new_file = convert_file("./test-document-17-pages.pdf",16)
+      assert_equal(20, page_count(new_file))
+    end
+  end
+end
+
+
+## The below is a blank A4 page, in pdf format, base64-encoded.
+## It is used to pad missing pages up to folio size.
+
+__END__
+JVBERi0xLjYKJcOkw7zDtsOfCjIgMCBvYmoKPDwvTGVuZ3RoIDMgMCBSL0ZpbHRlci9GbGF0ZURl
+Y29kZT4+CnN0cmVhbQp4nDPQM1Qo5ypUMFAw0DMwslAwtTTVMzI3VbAwMdSzMDNUKErlCtdSyOMK
+VAAAtxIIrgplbmRzdHJlYW0KZW5kb2JqCgozIDAgb2JqCjUwCmVuZG9iagoKNSAwIG9iago8PAo+
+PgplbmRvYmoKCjYgMCBvYmoKPDwvRm9udCA1IDAgUgovUHJvY1NldFsvUERGL1RleHRdCj4+CmVu
+ZG9iagoKMSAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDQgMCBSL1Jlc291cmNlcyA2IDAgUi9N
+ZWRpYUJveFswIDAgNTk1LjMwMzkzNzAwNzg3NCA4NDEuODg5NzYzNzc5NTI4XS9Hcm91cDw8L1Mv
+VHJhbnNwYXJlbmN5L0NTL0RldmljZVJHQi9JIHRydWU+Pi9Db250ZW50cyAyIDAgUj4+CmVuZG9i
+agoKNCAwIG9iago8PC9UeXBlL1BhZ2VzCi9SZXNvdXJjZXMgNiAwIFIKL01lZGlhQm94WyAwIDAg
+NTk1IDg0MSBdCi9LaWRzWyAxIDAgUiBdCi9Db3VudCAxPj4KZW5kb2JqCgo3IDAgb2JqCjw8L1R5
+cGUvQ2F0YWxvZy9QYWdlcyA0IDAgUgovT3BlbkFjdGlvblsxIDAgUiAvWFlaIG51bGwgbnVsbCAw
+XQovTGFuZyhwbC1QTCkKPj4KZW5kb2JqCgo4IDAgb2JqCjw8L0NyZWF0b3I8RkVGRjAwNTcwMDcy
+MDA2OTAwNzQwMDY1MDA3Mj4KL1Byb2R1Y2VyPEZFRkYwMDRDMDA2OTAwNjIwMDcyMDA2NTAwNEYw
+MDY2MDA2NjAwNjkwMDYzMDA2NTAwMjAwMDM3MDAyRTAwMzE+Ci9DcmVhdGlvbkRhdGUoRDoyMDIx
+MDYxODE0NTkyMyswMicwMCcpPj4KZW5kb2JqCgp4cmVmCjAgOQowMDAwMDAwMDAwIDY1NTM1IGYg
+CjAwMDAwMDAyMzQgMDAwMDAgbiAKMDAwMDAwMDAxOSAwMDAwMCBuIAowMDAwMDAwMTQwIDAwMDAw
+IG4gCjAwMDAwMDA0MDIgMDAwMDAgbiAKMDAwMDAwMDE1OSAwMDAwMCBuIAowMDAwMDAwMTgxIDAw
+MDAwIG4gCjAwMDAwMDA1MDAgMDAwMDAgbiAKMDAwMDAwMDU5NiAwMDAwMCBuIAp0cmFpbGVyCjw8
+L1NpemUgOS9Sb290IDcgMCBSCi9JbmZvIDggMCBSCi9JRCBbIDxCQUNBN0M3QTU0Nzc3MTZGNjYx
+NzY5REUyMDYyQzhFMD4KPEJBQ0E3QzdBNTQ3NzcxNkY2NjE3NjlERTIwNjJDOEUwPiBdCi9Eb2ND
+aGVja3N1bSAvMTgyQzA2ODA3NzBCMjM1RDM5OEJEOTFEQzVDOEY2MjEKPj4Kc3RhcnR4cmVmCjc3
+MAolJUVPRgo=
