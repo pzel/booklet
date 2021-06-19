@@ -3,11 +3,13 @@ require 'base64'
 require 'fileutils'
 $test_run = ENV["TEST_BOOKLET"]
 $deps = %w[ pdfseparate pdfunite pdfinfo pdftotext mktemp ]
+$empty_pdf_page = Base64.decode64(DATA.read)
+$pad = :pad
 
 def ensure_dependencies! executables
-  executables.each do |executable|
-    unless system("which #{executable} >/dev/null 2>&1")
-      $stderr.write("The command-line program <#{executable}> is needed "+
+  executables.each do |e|
+    unless system("which #{e} >/dev/null 2>&1")
+      $stderr.write("The command-line program <#{e}> is needed "+
                     "for this script to work.\n"+
                     "Please ensure that it's installed on your system.\n")
       exit(1)
@@ -28,12 +30,13 @@ def page_count filename
 end
 
 def explode filename
-  `pdfseparate '#{filename}' 'b-%d'`
+  res = system("pdfseparate '#{filename}' '#{PageName::template}'")
+  raise "Failed to explode file: #{filename}" unless res
 end
 
 def unite output_filename, page_order
   pages = page_order
-    .map{|page| (page == :p) ? "pad" : "b-#{page}"}
+    .map{|page| PageName.for_page(page)}
     .join(" ")
   `pdfunite #{pages} '#{output_filename}'`
 end
@@ -48,7 +51,7 @@ def booklet_pages(first, last, folio_count)
   assert_mod4(folio_count)
   pad_size = (4 - (last % 4)) % 4
   bp(first, last+pad_size, folio_count).
-    map{|p| (p > last) ? :p : p}
+    map{|p| (p > last) ? $pad : p}
 end
 
 def bp(n, m, pc)
@@ -63,8 +66,12 @@ def bp(n, m, pc)
   end
 end
 
+class PageName
+  def self.template; "b-%d"; end
+  def self.for_page(p); (p == $pad) ? "pad" : "b-#{p}"; end
+end
+
 def convert_file filename, folio_size
-  empty_pdf_page = Base64.decode64(DATA.read)
   absolute_source_name = File.expand_path(filename)
   base_source_name = File.basename(absolute_source_name)
   output_name = "booklet-#{File.basename(filename)}"
@@ -72,7 +79,9 @@ def convert_file filename, folio_size
     $stderr.print("Working in #{Dir.pwd}\n")
     `cp -v '#{absolute_source_name}' '#{base_source_name}'`
     explode(base_source_name)
-    File.open("pad", "w") { |f| f.write(empty_pdf_page) }
+    File.open(PageName.for_page($pad), "w") {|f|
+      f.sync=true; f.write($empty_pdf_page)
+    }
     page_numbers = booklet_pages(1, page_count(base_source_name), 32)
     unite(output_name, page_numbers)
     File.expand_path(output_name)
@@ -115,7 +124,7 @@ if $test_run
 
   class TestPageSorting < MiniTest::Test
     def test_4_folio_4
-      assert_equal([4,1,2,3], booklet_pages(1,4,32))
+      assert_equal([4,1,2,3], booklet_pages(1,4,4))
     end
 
     def test_4_folio_32
@@ -128,7 +137,7 @@ if $test_run
     end
 
     def test_9_folio_4
-      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, :p, 9, :p, :p],
+      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, $pad, 9, $pad, $pad],
                    booklet_pages(1,9,4))
     end
 
@@ -156,22 +165,26 @@ if $test_run
                    booklet_pages(1,20,16))
     end
     def test_pad_three
-      assert_equal([:p, 1, 2, :p, :p, 3, 4, 5],
+      assert_equal([$pad, 1, 2, $pad, $pad, 3, 4, 5],
                    booklet_pages(1,5,32))
     end
     def test_pad_two
       # big booklet. last 'page' is empty on both sides
-      assert_equal([:p, 1, 2, :p, 6, 3, 4, 5],
+      assert_equal([$pad, 1, 2, $pad, 6, 3, 4, 5],
                    booklet_pages(1,6,32))
     end
     def test_pad_one
       # still a big booklet. outsidemost page is empty
-      assert_equal([:p, 1, 2, 7, 6, 3, 4, 5],
+      assert_equal([$pad, 1, 2, 7, 6, 3, 4, 5],
                    booklet_pages(1,7,32))
     end
-    def test_pad_three_in_second_folio
-      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, 12, 9, 10, 11, 16, 13, 14, 15, :p, 17, 18, :p],
+    def test_pad_two_in_last_folio
+      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, 12, 9, 10, 11, 16, 13, 14, 15, $pad, 17, 18, $pad],
                    booklet_pages(1,18,4))
+    end
+    def test_pad_three_in_last_folio
+      assert_equal([4, 1, 2, 3, 8, 5, 6, 7, 12, 9, 10, 11, 16, 13, 14, 15, $pad, 17, $pad, $pad],
+                   booklet_pages(1,17,4))
     end
   end
 
@@ -203,6 +216,7 @@ end
 ## It is used to pad missing pages up to folio size.
 
 __END__
+
 JVBERi0xLjYKJcOkw7zDtsOfCjIgMCBvYmoKPDwvTGVuZ3RoIDMgMCBSL0ZpbHRlci9GbGF0ZURl
 Y29kZT4+CnN0cmVhbQp4nDPQM1Qo5ypUMFAw0DMwslAwtTTVMzI3VbAwMdSzMDNUKErlCtdSyOMK
 VAAAtxIIrgplbmRzdHJlYW0KZW5kb2JqCgozIDAgb2JqCjUwCmVuZG9iagoKNSAwIG9iago8PAo+
