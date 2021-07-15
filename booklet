@@ -5,6 +5,7 @@ $test_run = ENV["TEST_BOOKLET"]
 $deps = %w[ pdfseparate pdfunite pdfinfo pdftotext mktemp ]
 $empty_pdf_page = Base64.decode64(DATA.read)
 $pad = :pad
+$default_folio_size = 16
 
 def ensure_dependencies! executables
   executables.each do |e|
@@ -82,7 +83,8 @@ def convert_file filename, folio_size
     File.open(PageName.for_page($pad), "w") {|f|
       f.sync=true; f.write($empty_pdf_page)
     }
-    page_numbers = booklet_pages(1, page_count(base_source_name), 32)
+    page_numbers = booklet_pages(1, page_count(base_source_name),
+                                 folio_size)
     unite(output_name, page_numbers)
     File.expand_path(output_name)
   end
@@ -95,12 +97,12 @@ def main
     true
   elsif ARGV[0]
     pwd = `pwd`
-    outfile = convert_file(ARGV[0], (ARGV[1] || 16))
+    outfile = convert_file(ARGV[0], (ARGV[1] || $default_folio_size))
     `cp #{outfile} #{pwd}`
   else
     $stderr.write("Usage: booklet FILENAME [folio-size]\n\n"+
                   "Output is a new file, booklet-FILENAME.pdf\n"+
-                  "The default folio-size is 16 pages (4 sheets)")
+                  "The default folio-size is 16 pages (4 sheets)\n")
     exit(1)
   end
 end
